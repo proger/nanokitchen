@@ -28,6 +28,9 @@ except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 
+from blockdiag_linear import BlockdiagLinear
+Linear = BlockdiagLinear
+
 class Mamba(nn.Module):
     def __init__(
         self,
@@ -43,7 +46,7 @@ class Mamba(nn.Module):
         dt_init_floor=1e-4,
         conv_bias=True,
         bias=False,
-        use_fast_path=True,  # Fused kernel options
+        use_fast_path=False,  # Fused kernel options
         layer_idx=None,
         device=None,
         dtype=None,
@@ -59,7 +62,7 @@ class Mamba(nn.Module):
         self.use_fast_path = use_fast_path
         self.layer_idx = layer_idx
 
-        self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
+        self.in_proj = Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
 
         self.conv1d = nn.Conv1d(
             in_channels=self.d_inner,
@@ -77,7 +80,7 @@ class Mamba(nn.Module):
         self.x_proj = nn.Linear(
             self.d_inner, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs
         )
-        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True, **factory_kwargs)
+        self.dt_proj = Linear(self.dt_rank, self.d_inner, bias=True, **factory_kwargs)
 
         # Initialize special dt projection to preserve variance at initialization
         dt_init_std = self.dt_rank**-0.5 * dt_scale
@@ -114,7 +117,7 @@ class Mamba(nn.Module):
         self.D = nn.Parameter(torch.ones(self.d_inner, device=device))  # Keep in fp32
         self.D._no_weight_decay = True
 
-        self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
+        self.out_proj = Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
     def forward(self, hidden_states, inference_params=None):
         """
@@ -133,8 +136,8 @@ class Mamba(nn.Module):
 
         # We do matmul and transpose BLH -> HBL at the same time
         xz = rearrange(
-            self.in_proj.weight @ rearrange(hidden_states, "b l d -> d (b l)"),
-            "d (b l) -> b d l",
+            self.in_proj(rearrange(hidden_states, "b l d -> (b l) d")),
+            "(b l) d -> b d l",
             l=seqlen,
         )
         if self.in_proj.bias is not None:
@@ -181,8 +184,10 @@ class Mamba(nn.Module):
             # and L as the fastest moving dimension, since those are what the ssm_scan kernel expects.
             x_dbl = self.x_proj(rearrange(x, "b d l -> (b l) d"))  # (bl d)
             dt, B, C = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
-            dt = self.dt_proj.weight @ dt.t()
-            dt = rearrange(dt, "d (b l) -> b d l", l=seqlen)
+            #dt = self.dt_proj.weight @ dt.t()
+            #dt = rearrange(dt, "d (b l) -> b d l", l=seqlen)
+            dt = self.dt_proj(dt)
+            dt = rearrange(dt, "(b l) d -> b d l", l=seqlen)
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             assert self.activation in ["silu", "swish"]

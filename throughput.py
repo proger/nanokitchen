@@ -10,24 +10,26 @@ vocab_size = 16384
 scan_batch_size = False
 test_throughput = True
 #target_tokens = 200_000_000_000
-target_tokens = 21_400_000_000
+target_tokens = 21_400_000_000 # same as uk4b large
 arch = 'mamba'
+dtype = torch.bfloat16
 
 match arch:
   case 'mamba':
-    from mamba_ssm import Mamba, MambaLMHeadModel
+    from mixer_seq_simple import MambaLMHeadModel
     from mamba_ssm.models.config_mamba import MambaConfig
 
     #batch_size, seq_len = 4, 8192
     #batch_size, seq_len = 14, 512
-    batch_size, seq_len = 1, 4096
+    batch_size, seq_len = 2, 2048
     config = MambaConfig(
       d_model=1536,
-      n_layer=48,
+      #n_layer=48,
+      n_layer=36,
       vocab_size=vocab_size,
       ssm_cfg={},
-      rms_norm=True,
-      fused_add_norm=True,
+      rms_norm=False, #True,
+      fused_add_norm=False,
       residual_in_fp32=True,
     )
 
@@ -35,9 +37,10 @@ match arch:
       config=config
     )
     model = model.to(device)
+    model = torch.compile(model)
 
     def forward_backward(inputs, targets):
-      with torch.autocast('cuda', dtype=torch.float16):
+      with torch.autocast('cuda', dtype=dtype):
         output = model(inputs)
         y = output.logits
         loss = F.cross_entropy(y.view(-1, vocab_size), targets.view(-1))
@@ -45,14 +48,16 @@ match arch:
         return loss
 
   case 'gpt':
+    #batch_size, seq_len = 1, 8192
     batch_size, seq_len = 2, 1024
+    linear = 'blockdiag' # or 'default'
     from model import GPT, GPTConfig 
-    config = GPTConfig(block_size=seq_len)
+    config = GPTConfig(block_size=seq_len, linear=linear)
     model = GPT(config).to(device)
     model = torch.compile(model)
 
     def forward_backward(inputs, targets):
-      with torch.autocast('cuda', dtype=torch.bfloat16):
+      with torch.autocast('cuda', dtype=dtype):
         logits, loss = model(inputs, targets=targets)
         loss.backward()
         return loss

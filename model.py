@@ -38,6 +38,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from flash_attn import flash_attn_func
+from blockdiag_linear import BlockdiagLinear
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
