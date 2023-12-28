@@ -27,7 +27,7 @@ def scan2(
     UNROLL_LENGTH: tl.constexpr,
 ):
     out = 0.
-    for chunk_i in range((SEQUENCE_LENGTH+UNROLL_LENGTH)//UNROLL_LENGTH):
+    for chunk_i in range(tl.cdiv(SEQUENCE_LENGTH, UNROLL_LENGTH)):
         for unroll_i in tl.static_range(UNROLL_LENGTH):
             i = chunk_i * UNROLL_LENGTH + unroll_i
             if i == 0:
@@ -52,11 +52,10 @@ def scan2(
         x_names=["SEQUENCE_LENGTH"],
         x_vals=[2**i for i in range(17)],
         line_arg="UNROLL_LENGTH",
-        line_vals=[16,32,64,128,256],
-        line_names=[str(s) for s in [16,32,64,128,256]],
+        line_vals=[1,2,4,8,16,32,64,128,256],
+        line_names=[str(s) for s in [1,2,4,8,16,32,64,128,256]],
         plot_name="scan2",
         args={
-            #"SEQUENCE_LENGTH": seq_len,
             "provider": "scan2",
         }
     ),
@@ -118,7 +117,7 @@ def test_allclose():
     scan1[(1,)](gates, tokens, outputs, T)
 
     outputs2 = torch.empty_like(tokens)
-    scan2[(1,)](gates, tokens, outputs2, T)
+    scan2[(1,)](gates, tokens, outputs2, T, UNROLL_LENGTH=16)
 
     assert torch.allclose(outputs, outputs2)
 
