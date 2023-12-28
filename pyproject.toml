@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 version = "0.1"
 name = "nanokitchen"
 dependencies = [
+  "einops",
   "cuda-python",
   #"mamba-ssm",
   "nvidia-ml-py3",
