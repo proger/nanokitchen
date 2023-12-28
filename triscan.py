@@ -26,15 +26,18 @@ def scan2(
     SEQUENCE_LENGTH: tl.constexpr,
     UNROLL_LENGTH: tl.constexpr,
 ):
+    global_id = tl.num_programs(axis=1) * tl.program_id(axis=0) + tl.program_id(axis=1)
+    offset = global_id * SEQUENCE_LENGTH
+
     out = 0.
     for chunk_i in range(tl.cdiv(SEQUENCE_LENGTH, UNROLL_LENGTH)):
         for unroll_i in tl.static_range(UNROLL_LENGTH):
             i = chunk_i * UNROLL_LENGTH + unroll_i
             if i == 0:
-                out = tl.load(tokens + i)
+                out = tl.load(tokens + offset + i)
             else:
-                out = tl.load(gates + i) * out + tl.load(tokens + i)
-            tl.store(outputs + i, out)
+                out = tl.load(gates + offset + i) * out + tl.load(tokens + offset + i)
+            tl.store(outputs + offset + i, out)
 
 @triton.testing.perf_report([
     triton.testing.Benchmark(
@@ -126,6 +129,18 @@ def test_allclose():
 
     assert torch.allclose(outputs, outputs_naive)
 
+def test_allclose2():
+    device = 'cuda'
+    B, C, T = 8, 16, 512
+    gates, tokens = init(B, C, T, device)
+
+    outputs = torch.empty_like(tokens)
+    scan2[(B,C)](gates, tokens, outputs, T, UNROLL_LENGTH=16)
+
+    outputs_naive = torch.empty_like(tokens)
+    scan_eager(gates, tokens, outputs_naive)
+
+    assert torch.allclose(outputs, outputs_naive)
 
 if __name__ == '__main__':
     bench.run(save_path=".", print_data=True)
