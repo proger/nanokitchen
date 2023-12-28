@@ -11,7 +11,7 @@ scan_batch_size = False
 test_throughput = True
 #target_tokens = 200_000_000_000
 target_tokens = 21_400_000_000 # same as uk4b large
-arch = 'mamba'
+arch = 'gpt'
 dtype = torch.bfloat16
 
 match arch:
