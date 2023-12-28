@@ -24,15 +24,17 @@ def scan2(
     tokens,
     outputs,
     SEQUENCE_LENGTH: tl.constexpr,
+    UNROLL_LENGTH: tl.constexpr,
 ):
     out = 0.
-    for i in tl.static_range(SEQUENCE_LENGTH):
-        if i == 0:
-            out = tl.load(tokens + i)
-        else:
-            out = tl.load(gates + i) * out + tl.load(tokens + i)
-        tl.store(outputs + i, out)
-
+    for chunk_i in range((SEQUENCE_LENGTH+UNROLL_LENGTH)//UNROLL_LENGTH):
+        for unroll_i in tl.static_range(UNROLL_LENGTH):
+            i = chunk_i * UNROLL_LENGTH + unroll_i
+            if i == 0:
+                out = tl.load(tokens + i)
+            else:
+                out = tl.load(gates + i) * out + tl.load(tokens + i)
+            tl.store(outputs + i, out)
 
 @triton.testing.perf_report([
     triton.testing.Benchmark(
@@ -44,6 +46,18 @@ def scan2(
         plot_name="scan1",  # name of the plot
         args={
             #"SEQUENCE_LENGTH": seq_len,
+        }
+    ),
+    triton.testing.Benchmark(
+        x_names=["SEQUENCE_LENGTH"],
+        x_vals=[2**i for i in range(17)],
+        line_arg="UNROLL_LENGTH",
+        line_vals=[16,32,64,128,256],
+        line_names=[str(s) for s in [16,32,64,128,256]],
+        plot_name="scan2",
+        args={
+            #"SEQUENCE_LENGTH": seq_len,
+            "provider": "scan2",
         }
     ),
     # triton.testing.Benchmark(
@@ -58,16 +72,16 @@ def scan2(
     #     }
     # ),
 ])
-def bench(provider, SEQUENCE_LENGTH, device="cuda"):
+def bench(provider, SEQUENCE_LENGTH, UNROLL_LENGTH=16, device="cuda"):
     B, C, T = 1, 1, SEQUENCE_LENGTH
     gates, tokens = init(B, C, T, device)
     outputs = torch.empty_like(tokens)
 
     match provider:
         case "scan1":
-            scan = lambda: scan1[(SEQUENCE_LENGTH,)](gates, tokens, outputs, SEQUENCE_LENGTH)
+            scan = lambda: scan1[(1,)](gates, tokens, outputs, SEQUENCE_LENGTH)
         case "scan2":
-            scan = lambda: scan2[(SEQUENCE_LENGTH,)](gates, tokens, outputs, SEQUENCE_LENGTH)
+            scan = lambda: scan2[(1,)](gates, tokens, outputs, SEQUENCE_LENGTH, UNROLL_LENGTH)
         case "eager":
             scan = lambda: scan_eager(gates, tokens, outputs)
         case "compile":
@@ -101,10 +115,10 @@ def test_allclose():
     B, C, T = 1, 1, 512
     gates, tokens = init(B, C, T, device)
     outputs = torch.empty_like(tokens)
-    scan1[(T,)](gates, tokens, outputs, T)
+    scan1[(1,)](gates, tokens, outputs, T)
 
     outputs2 = torch.empty_like(tokens)
-    scan2[(T,)](gates, tokens, outputs2, T)
+    scan2[(1,)](gates, tokens, outputs2, T)
 
     assert torch.allclose(outputs, outputs2)
 
