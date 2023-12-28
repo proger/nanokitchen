@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+version = "0.1"
+name = "nanokitchen"
+dependencies = [
+  "cuda-python",
+  #"mamba-ssm",
+  "nvidia-ml-py3",
+  "torch"
+]
+requires-python = ">= 3.10"
+
+# https://packaging.python.org/en/latest/guides/writing-pyproject-toml/
