@@ -29,6 +29,7 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
 
+import sys
 import math
 import inspect
 from dataclasses import dataclass
@@ -37,7 +38,10 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from flash_attn import flash_attn_func
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
 from blockdiag_linear import BlockdiagLinear
 
 class LayerNorm(nn.Module):
@@ -86,9 +90,9 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            #y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-            scale = 1.0 / math.sqrt(k.size(-1))
-            y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, softmax_scale=scale, causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            #scale = 1.0 / math.sqrt(k.size(-1))
+            #y = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0, softmax_scale=scale, causal=True)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
