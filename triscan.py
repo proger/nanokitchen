@@ -42,6 +42,27 @@ def scan2(
                 out = tl.load(gates + offset + i) * out + tl.load(tokens + offset + i)
             tl.store(outputs + offset + i, out)
 
+@triton.jit
+def scan2_backward(
+    gates,
+    tokens,
+    outputs,
+    SEQUENCE_LENGTH: tl.constexpr,
+    UNROLL_LENGTH: tl.constexpr,
+):
+    global_id = tl.num_programs(axis=1) * tl.program_id(axis=0) + tl.program_id(axis=1)
+    offset = global_id * SEQUENCE_LENGTH
+
+    out = 0.
+    for chunk_i in range(tl.cdiv(SEQUENCE_LENGTH, UNROLL_LENGTH)-1, -1, -1):
+        for unroll_i in tl.static_range(UNROLL_LENGTH-1, -1, -1):
+            i = chunk_i * UNROLL_LENGTH + unroll_i
+            if i == SEQUENCE_LENGTH-1:
+                out = tl.load(tokens + offset + i)
+            else:
+                out = tl.load(gates + offset + i + 1) * out + tl.load(tokens + offset + i)
+            tl.store(outputs + offset + i, out)
+
 # from https://github.com/openai/triton/issues/2359
 @triton.jit
 def unpack64(merged):
@@ -84,6 +105,38 @@ def scan3(
     output_tuples = tl.associative_scan(tuples, 0, combine_fn=scan_op)
     output_tokens, output_gates = unpack64(output_tuples)
     tl.store(outputs + offsets, output_tokens)
+
+class Scan(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, gates, tokens):
+        B, C, T = gates.shape
+        assert tokens.shape == (B, C, T)
+
+        states = torch.zeros_like(tokens)
+        scan2[(B,C)](gates, tokens, states, T, UNROLL_LENGTH=64)
+
+        ctx.save_for_backward(states, gates)
+        return states
+
+    # backward scan is a padded reverse scan
+    # https://arxiv.org/abs/1709.04057 Section 2.2
+    @staticmethod
+    def backward(ctx, grad_output):
+        states, gates = ctx.saved_tensors
+        B, C, T = gates.shape
+
+        grad_output = grad_output.contiguous()
+        assert states.is_contiguous()
+        assert gates.is_contiguous()
+
+        d_states = torch.zeros_like(states)
+        scan2_backward[(B,C)](gates, grad_output.contiguous(), d_states, T, UNROLL_LENGTH=64)
+
+        outputs_pad = torch.cat([torch.zeros_like(states[:, :, :1]), states], dim=-1)[:, :, :-1]
+        d_gates = outputs_pad * d_states
+
+        d_tokens = d_states
+        return d_gates, d_tokens
 
 @triton.testing.perf_report([
     triton.testing.Benchmark(
@@ -157,7 +210,7 @@ def scan_eager(gates, tokens, outputs):
         if i == 0:
             outputs[:, :, i] = tokens[:, :, i]
         else:
-            outputs[:, :, i] = gates[:, :, i] * outputs[:, :, i-1] + tokens[:, :, i]
+            outputs[:, :, i] = gates[:, :, i] * outputs[:, :, i-1].clone() + tokens[:, :, i]
 
 def test_allclose():
     device = 'cuda'
@@ -202,6 +255,38 @@ def test_allclose3():
     print(outputs)
     print(outputs3)
     assert torch.allclose(outputs, outputs3, atol=1e-1)
+
+def test_backward():
+    device = 'cuda'
+    B, C, T = 4, 8, 512
+    gates, tokens = init(B, C, T, device)
+    gates.requires_grad = True
+    tokens.requires_grad = True
+
+    outputs_eager = torch.empty_like(tokens)
+    scan_eager(gates, tokens, outputs_eager)
+    outputs_eager.sum().backward()
+
+    gates_auto_grad = gates.grad.clone()
+    tokens_auto_grad = tokens.grad.clone()
+    gates.grad = None
+    tokens.grad = None
+
+    outputs = Scan.apply(gates, tokens)
+    outputs.sum().backward()
+
+    # print(outputs)
+    # print(outputs_eager)
+    assert torch.allclose(outputs, outputs_eager)
+
+    print(tokens_auto_grad[0,0,:64])
+    print(tokens.grad[0,0,:64])
+    assert torch.allclose(tokens_auto_grad, tokens.grad)
+
+    print(gates_auto_grad[0,0,:64])
+    print(gates.grad[0,0,:64])
+    assert torch.allclose(gates_auto_grad, gates.grad)
+
 
 if __name__ == '__main__':
     bench.run(save_path=".", print_data=True)
