@@ -288,8 +288,8 @@ def parallel_scan1(gates, x, mul, add, zeros_like, level):
     #     }
     # ),
 ])
-def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=2, device="cuda"):
-    B, C, T = 1, 512, SEQUENCE_LENGTH
+def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=64, device="cuda"):
+    B, C, T = 1, 1, SEQUENCE_LENGTH
     gates, tokens = init(B, C, T, device)
     outputs = torch.empty_like(tokens)
 
@@ -312,7 +312,9 @@ def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=2, device="cuda"):
                                               CHUNK_LENGTH=SEQUENCE_LENGTH,
                                               num_warps=1)
             else:
-                print("Grid axis z has size", T//CHUNK_LENGTH)
+                c = int(math.sqrt(SEQUENCE_LENGTH))
+                CHUNK_LENGTH = triton.next_power_of_2(triton.cdiv(SEQUENCE_LENGTH, c))
+                print("scan4: grid axis z has size", T//CHUNK_LENGTH)
                 scan = lambda: scan4[(B,C,T//CHUNK_LENGTH)](gates, tokens, outputs, ports, locks,
                                                             SEQUENCE_LENGTH=SEQUENCE_LENGTH,
                                                             CHUNK_LENGTH=CHUNK_LENGTH,
