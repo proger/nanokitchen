@@ -1,3 +1,4 @@
+import math
 import torch
 import triton
 import triton.language as tl
@@ -194,15 +195,65 @@ class Scan(torch.autograd.Function):
         d_tokens = d_states
         return d_gates, d_tokens
 
+
+def split(x):
+  """
+  Take a sequence of inputs that represents a tree level,
+  and return all left children and all right children.
+
+  >>> split(torch.tensor([1,2,3,4,5,6,7,8])[None, None, :])
+  (tensor([[[1, 3, 5, 7]]]), tensor([[[2, 4, 6, 8]]])
+  """
+  B, C, T = x.size()
+  x = x.view(B, C, T//2, 2)
+  return x[: , :, :, 0], x[:, :, :, 1]
+
+def merge(lefts, rights):
+  """
+  Take sequences of all left children and sequences of all right children and merge them
+  into a single tree level.
+
+  >>> lefts = torch.tensor([1,3,5,7])[None, None, :]
+  >>> rights = torch.tensor([2,4,6,8])[None, None, :]
+  >>> merge(lefts, rights)
+  tensor([[[1, 2, 3, 4, 5, 6, 7, 8]]])
+  """
+  B, C, half = lefts.size()
+  x = torch.stack([lefts, rights], dim=-1) # (bsz, dim, half, 2)
+  return x.view(B, C, half*2)
+
+@torch.compile
+def parallel_scan(gates, x, mul=torch.mul, add=torch.add, zeros_like=torch.zeros_like):
+  B,C,T = x.size()
+  level = int(math.log2(T))
+  return add(mul(parallel_scan1(gates, x, mul, add, zeros_like, level=level), gates), x)
+
+def parallel_scan1(gates, x, mul, add, zeros_like, level):
+  left_gates, right_gates = split(gates)
+  left_x, right_x = split(x)
+
+  # up: sum together
+  gates = mul(left_gates, right_gates)
+  x = add(mul(right_gates, left_x), right_x)
+
+  if level == 1:
+      root_x = zeros_like(x)
+  else:
+      root_x = parallel_scan1(gates, x, mul, add, zeros_like, level=level-1)
+
+  # down: push from left to right
+  return merge(root_x, add(mul(root_x, left_gates), left_x))
+
+
 @triton.testing.perf_report([
     triton.testing.Benchmark(
         x_names=["SEQUENCE_LENGTH"],  # argument names to use as an x-axis for the plot
-        x_vals=[2**i for i in range(17)],
+        x_vals=[2**i for i in range(2,17)],
         line_arg="provider",  # argument name whose value corresponds to a different line in the plot
         #line_vals=["scan1", "scan2", "tl.associative_scan", "eager"],  # argument values to use as different lines in the plot
         #line_names=["scan1", "scan2", "tl.associative_scan", "eager"],  # legend entries to use for each line
-        line_vals=["scan1", "scan2", "tl.associative_scan", "scan4"],
-        line_names=["scan1", "scan2", "tl.associative_scan (fast but wrong)", "scan4"],
+        line_vals=["scan1", "scan2", "tl.associative_scan", "scan4", "parallel_scan"],
+        line_names=["scan1", "scan2", "tl.associative_scan (fast but wrong)", "scan4", "parallel_scan (with torch.compile)"],
         plot_name="scan1",  # name of the plot
         args={
             #"SEQUENCE_LENGTH": seq_len,
@@ -260,6 +311,8 @@ def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=2, device="cuda"):
                                                             SEQUENCE_LENGTH=SEQUENCE_LENGTH,
                                                             CHUNK_LENGTH=CHUNK_LENGTH,
                                                             num_warps=1)
+        case "parallel_scan":
+            scan = lambda: parallel_scan(gates, tokens)
         case "eager":
             scan = lambda: scan_eager(gates, tokens, outputs)
         case "compile":
