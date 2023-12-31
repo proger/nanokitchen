@@ -248,7 +248,11 @@ def parallel_scan1(gates, x, mul, add, zeros_like, level):
 @triton.testing.perf_report([
     triton.testing.Benchmark(
         x_names=["SEQUENCE_LENGTH"],  # argument names to use as an x-axis for the plot
-        x_vals=[2**i for i in range(2,17)],
+        x_vals=[2**i for i in range(6,17)],
+        xlabel='sequence length',
+        ylabel='ms',
+        x_log=True,
+        y_log=True,
         line_arg="provider",  # argument name whose value corresponds to a different line in the plot
         #line_vals=["scan1", "scan2", "tl.associative_scan", "eager"],  # argument values to use as different lines in the plot
         #line_names=["scan1", "scan2", "tl.associative_scan", "eager"],  # legend entries to use for each line
@@ -261,7 +265,7 @@ def parallel_scan1(gates, x, mul, add, zeros_like, level):
     ),
     triton.testing.Benchmark(
         x_names=["SEQUENCE_LENGTH"],
-        x_vals=[2**i for i in range(17)],
+        x_vals=[2**i for i in range(6,17)],
         line_arg="CHUNK_LENGTH",
         line_vals=[1,2,4,8,16,32,64,128,256],
         line_names=[str(s) for s in [1,2,4,8,16,32,64,128,256]],
@@ -322,7 +326,7 @@ def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=2, device="cuda"):
         case _:
             raise ValueError(f"Unknown provider {provider}")
 
-    ms = triton.testing.do_bench(scan, warmup=25, rep=100)
+    ms = triton.testing.do_bench(scan, warmup=1000, rep=100)
     return ms
 
 def init(B, C, T, device):
