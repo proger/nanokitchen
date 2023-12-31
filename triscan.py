@@ -120,7 +120,7 @@ def scan4(
 ):
     sequence_id = tl.num_programs(axis=1) * tl.program_id(axis=0) + tl.program_id(axis=1)
     seq_stride = sequence_id * SEQUENCE_LENGTH
-    chunks = tl.num_programs(axis=2)
+    other_chunks = tl.num_programs(axis=2)-1
     chunk = tl.program_id(axis=2) * CHUNK_LENGTH
     Lock = sequence_locks + sequence_id
 
@@ -137,11 +137,10 @@ def scan4(
 
         tl.store(outputs + seq_stride + i, out)
         tl.store(ports + seq_stride + i, port)
-    tl.atomic_add(Lock, 1)
 
     if chunk == 0:
         # wait for all chunks to complete
-        while tl.atomic_min(Lock, chunks) != chunks:
+        while tl.atomic_min(Lock, other_chunks) != other_chunks:
             pass
 
         # stitch all chunks
@@ -162,6 +161,8 @@ def scan4(
             #     tl.device_print(
             #         "stitch ", tl.program_id(axis=0), tl.program_id(axis=1), tl.program_id(axis=2), chunk_i, chunk_outputs, last_out, chunk_ports, indices
             #     )
+    else:
+        tl.atomic_add(Lock, 1)
 
 
 class Scan(torch.autograd.Function):
