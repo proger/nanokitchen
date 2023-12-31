@@ -112,46 +112,54 @@ def scan4(
     tokens,
     outputs,
     ports,
+    sequence_locks,
     SEQUENCE_LENGTH: tl.constexpr,
     CHUNK_LENGTH: tl.constexpr,
 ):
-    global_id = tl.num_programs(axis=1) * tl.program_id(axis=0) + tl.program_id(axis=1)
-    seq_offset = global_id * SEQUENCE_LENGTH
+    sequence_id = tl.num_programs(axis=1) * tl.program_id(axis=0) + tl.program_id(axis=1)
+    seq_stride = sequence_id * SEQUENCE_LENGTH
     chunk = tl.program_id(axis=2) * CHUNK_LENGTH
+    Lock = sequence_locks + sequence_id
 
     out = 0.
     port = 1.
     for unroll_i in tl.static_range(CHUNK_LENGTH):
         i = chunk + unroll_i
-        gate = tl.load(gates + seq_offset + i)
+        gate = tl.load(gates + seq_stride + i)
         port = port * gate
         if i == 0:
-            out = tl.load(tokens + seq_offset + i)
+            out = tl.load(tokens + seq_stride + i)
         else:
-            out = gate * out + tl.load(tokens + seq_offset + i)
-        tl.store(outputs + seq_offset + i, out)
-        tl.store(ports + seq_offset + i, port)
+            out = gate * out + tl.load(tokens + seq_stride + i)
 
-    tl.debug_barrier()
+        tl.store(outputs + seq_stride + i, out)
+        tl.store(ports + seq_stride + i, port)
+        tl.atomic_add(Lock, 1)
+
     if chunk == 0:
-        tl.debug_barrier()
+        # wait for all chunks to complete
+        while tl.atomic_min(Lock, SEQUENCE_LENGTH) != SEQUENCE_LENGTH:
+            pass
 
         # stitch all chunks
         indices = tl.arange(0, CHUNK_LENGTH)
         last_index = CHUNK_LENGTH - 1
-        last_out = tl.load(outputs + seq_offset + last_index)
+        last_out = tl.load(outputs + seq_stride + last_index)
 
         for chunk_i in range(1, tl.num_programs(axis=2)):
-            offsets = seq_offset + chunk_i * CHUNK_LENGTH + indices
-            chunk_outputs = tl.load(outputs + offsets)
-            chunk_ports = tl.load(ports + offsets)
-            chunk_outputs = chunk_ports * last_out + chunk_outputs
-            tl.store(outputs + offsets, chunk_outputs)
-            last_out = tl.load(outputs + seq_offset + chunk_i * CHUNK_LENGTH + last_index)
-            ## WHY DO YOU WORK ONLY WITH THIS PRINT?
-            # tl.device_print(
-            #     "stitch ", tl.program_id(axis=0), tl.program_id(axis=1), tl.program_id(axis=2), chunk_i,
-            # )
+            strides = seq_stride + chunk_i * CHUNK_LENGTH + indices
+            chunk_outputs = tl.load(outputs + strides)
+            chunk_ports = tl.load(ports + strides)
+            chunk_outputs1 = chunk_ports * last_out + chunk_outputs
+            tl.store(outputs + strides, chunk_outputs1)
+            last_out = tl.load(outputs + seq_stride + chunk_i * CHUNK_LENGTH + last_index)
+
+            # tl.device_assert(chunk_ports != 42, "CANARY DETECTED: MISSING WRITE TO ports")  # i messed up locking the first time
+            # if tl.program_id(axis=0) == 0 and tl.program_id(axis=1) == 2:
+            #     tl.device_print(
+            #         "stitch ", tl.program_id(axis=0), tl.program_id(axis=1), tl.program_id(axis=2), chunk_i, chunk_outputs, last_out, chunk_ports, indices
+            #     )
+
 
 class Scan(torch.autograd.Function):
     @staticmethod
@@ -337,19 +345,28 @@ def test_backward():
 
 def test_grid():
     device = 'cuda'
-    B, C, T = 4, 4, 4
-    CHUNK_LENGTH = 2
+    B, C, T = 1, 3, 1024
+    CHUNK_LENGTH = 128
+
+    torch.manual_seed(12312323)
     gates, tokens = init(B, C, T, device)
+
+    # gates, tokens = init(B, 1, T, device)
+    # gates = gates.repeat(1,C,1).clone().contiguous()
+    # tokens = tokens.repeat(1,C,1).clone().contiguous()
 
     outputs_eager = torch.empty_like(tokens)
     scan_eager(gates, tokens, outputs_eager)
 
-    outputs = torch.empty_like(tokens)
-    ports = torch.empty_like(gates)
-    scan4[(B,C,T//CHUNK_LENGTH)](gates, tokens, outputs, ports, T, CHUNK_LENGTH=CHUNK_LENGTH, num_warps=1)
-    torch.cuda.synchronize()
+    outputs = torch.zeros_like(tokens).contiguous()
+    ports = torch.zeros_like(gates).contiguous() + 42
+    locks = torch.zeros((B,C), dtype=torch.int32, device=device).contiguous()
+    scan4[(B,C,T//CHUNK_LENGTH)](gates, tokens, outputs, ports, locks, SEQUENCE_LENGTH=T, CHUNK_LENGTH=CHUNK_LENGTH, num_warps=1)
     print()
-    print(outputs - outputs_eager)
+    print(locks, 'locks')
+    print(torch.where(~torch.isclose(outputs, outputs_eager)))
+    print(outputs)
+    print(outputs_eager[0,-1,:])
     assert torch.allclose(outputs, outputs_eager)
 
 if __name__ == '__main__':
