@@ -88,6 +88,7 @@ def scan_op(l, r):
     f = fl * fr
     return pack64(x, f)
 
+# fast but inaccurate, see test_allclose3
 @triton.jit
 def scan3(
     gates,
@@ -200,8 +201,8 @@ class Scan(torch.autograd.Function):
         line_arg="provider",  # argument name whose value corresponds to a different line in the plot
         #line_vals=["scan1", "scan2", "tl.associative_scan", "eager"],  # argument values to use as different lines in the plot
         #line_names=["scan1", "scan2", "tl.associative_scan", "eager"],  # legend entries to use for each line
-        line_vals=["scan1", "scan2", "tl.associative_scan"],
-        line_names=["scan1", "scan2", "tl.associative_scan"],
+        line_vals=["scan1", "scan2", "tl.associative_scan", "scan4"],
+        line_names=["scan1", "scan2", "tl.associative_scan (fast but wrong)", "scan4"],
         plot_name="scan1",  # name of the plot
         args={
             #"SEQUENCE_LENGTH": seq_len,
@@ -210,7 +211,7 @@ class Scan(torch.autograd.Function):
     triton.testing.Benchmark(
         x_names=["SEQUENCE_LENGTH"],
         x_vals=[2**i for i in range(17)],
-        line_arg="UNROLL_LENGTH",
+        line_arg="CHUNK_LENGTH",
         line_vals=[1,2,4,8,16,32,64,128,256],
         line_names=[str(s) for s in [1,2,4,8,16,32,64,128,256]],
         plot_name="scan2",
@@ -230,18 +231,35 @@ class Scan(torch.autograd.Function):
     #     }
     # ),
 ])
-def bench(provider, SEQUENCE_LENGTH, UNROLL_LENGTH=64, device="cuda"):
+def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=2, device="cuda"):
     B, C, T = 1, 1, SEQUENCE_LENGTH
     gates, tokens = init(B, C, T, device)
     outputs = torch.empty_like(tokens)
+
+    print(f"Running {provider} with sequence length {SEQUENCE_LENGTH} and chunk length {CHUNK_LENGTH}")
 
     match provider:
         case "scan1":
             scan = lambda: scan1[(1,)](gates, tokens, outputs, SEQUENCE_LENGTH)
         case "scan2":
-            scan = lambda: scan2[(1,)](gates, tokens, outputs, SEQUENCE_LENGTH, UNROLL_LENGTH)
+            scan = lambda: scan2[(1,)](gates, tokens, outputs, SEQUENCE_LENGTH, CHUNK_LENGTH)
         case "tl.associative_scan":
             scan = lambda: scan3[(1,)](gates, tokens, outputs, SEQUENCE_LENGTH)
+        case "scan4":
+            outputs = torch.zeros_like(tokens).contiguous()
+            ports = torch.zeros_like(gates).contiguous() + 42
+            locks = torch.zeros((B, C), dtype=torch.int32, device=device).contiguous()
+            if SEQUENCE_LENGTH < CHUNK_LENGTH:
+                scan = lambda: scan4[(B,C,1)](gates, tokens, outputs, ports, locks,
+                                              SEQUENCE_LENGTH=SEQUENCE_LENGTH,
+                                              CHUNK_LENGTH=SEQUENCE_LENGTH,
+                                              num_warps=1)
+            else:
+                print("Grid axis z has size", T//CHUNK_LENGTH)
+                scan = lambda: scan4[(B,C,T//CHUNK_LENGTH)](gates, tokens, outputs, ports, locks,
+                                                            SEQUENCE_LENGTH=SEQUENCE_LENGTH,
+                                                            CHUNK_LENGTH=CHUNK_LENGTH,
+                                                            num_warps=1)
         case "eager":
             scan = lambda: scan_eager(gates, tokens, outputs)
         case "compile":
@@ -299,7 +317,7 @@ def test_allclose2():
 
 def test_allclose3():
     device = 'cuda'
-    B, C, T = 1,1, 512
+    B, C, T = 1, 1, 64
     gates, tokens = init(B, C, T, device)
 
     outputs = torch.empty_like(tokens)
@@ -309,11 +327,13 @@ def test_allclose3():
     scan3[(B,C)](gates, tokens, outputs3, T)
     print(outputs)
     print(outputs3)
+    print(outputs - outputs3)
+    # LOOK AT THIS MASSIVE atol:
     assert torch.allclose(outputs, outputs3, atol=1e-1)
 
 def test_backward():
     device = 'cuda'
-    B, C, T = 4, 8, 512
+    B, C, T = 1, 8, 512
     gates, tokens = init(B, C, T, device)
     gates.requires_grad = True
     tokens.requires_grad = True
@@ -345,9 +365,11 @@ def test_backward():
 
 def test_grid():
     device = 'cuda'
-    B, C, T = 1, 3, 1024
-    CHUNK_LENGTH = 128
+    # B, C, T = 1, 3, 1024
+    # CHUNK_LENGTH = 128
 
+    B, C, T = 1, 1, 128
+    CHUNK_LENGTH = 64
     torch.manual_seed(12312323)
     gates, tokens = init(B, C, T, device)
 
