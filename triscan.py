@@ -1,5 +1,6 @@
 import math
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -164,6 +165,13 @@ def scan4(
     else:
         tl.atomic_add(Lock, 1)
 
+# https://github.com/glassroom/heinsen_sequence
+@torch.compile
+def heinsen_positive(log_coeffs, log_values):
+    a_star = torch.cumsum(log_coeffs, dim=-1)                             # eq (2) in paper
+    log_x0_plus_b_star = torch.logcumsumexp(log_values - a_star, dim=-1)  # eq (7) in paper
+    log_x = a_star + log_x0_plus_b_star                                   # eq (1) in paper
+    return torch.exp(log_x)                                               # already a float
 
 class Scan(torch.autograd.Function):
     @staticmethod
@@ -258,8 +266,8 @@ def parallel_scan1(gates, x, mul, add, zeros_like, level):
         line_arg="provider",  # argument name whose value corresponds to a different line in the plot
         #line_vals=["scan1", "scan2", "tl.associative_scan", "eager"],  # argument values to use as different lines in the plot
         #line_names=["scan1", "scan2", "tl.associative_scan", "eager"],  # legend entries to use for each line
-        line_vals=["scan1", "scan2", "tl.associative_scan", "scan4", "parallel_scan"],
-        line_names=["scan1", "scan2", "tl.associative_scan (fast but wrong)", "scan4", "parallel_scan (with torch.compile)"],
+        line_vals=["scan1", "scan2", "tl.associative_scan", "scan4", "parallel_scan", "heinsen_positive"],
+        line_names=["scan1", "scan2", "tl.associative_scan (fast but wrong)", "scan4", "parallel_scan (with torch.compile)", "Heinsen"],
         plot_name="scan1",  # name of the plot
         args={
             #"SEQUENCE_LENGTH": seq_len,
@@ -321,6 +329,8 @@ def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=64, device="cuda"):
                                                             num_warps=1)
         case "parallel_scan":
             scan = lambda: parallel_scan(gates, tokens)
+        case "heinsen_positive":
+            scan = lambda: heinsen_positive(gates.abs().log(), tokens.abs().log())
         case "eager":
             scan = lambda: scan_eager(gates, tokens, outputs)
         case "compile":
@@ -448,6 +458,20 @@ def test_grid():
     print(torch.where(~torch.isclose(outputs, outputs_eager)))
     print(outputs)
     print(outputs_eager[0,-1,:])
+    assert torch.allclose(outputs, outputs_eager)
+
+def test_heinsen():
+    device = 'cuda'
+    B, C, T = 1, 1024, 128
+    torch.manual_seed(12312323)
+    gates, tokens = init(B, C, T, device)
+    gates = gates.abs()
+    tokens = tokens.abs()
+
+    outputs_eager = torch.empty_like(tokens)
+    scan_eager(gates, tokens, outputs_eager)
+
+    outputs = heinsen_positive(gates.log(), tokens.log())
     assert torch.allclose(outputs, outputs_eager)
 
 if __name__ == '__main__':
