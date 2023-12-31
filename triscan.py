@@ -106,6 +106,53 @@ def scan3(
     output_tokens, output_gates = unpack64(output_tuples)
     tl.store(outputs + offsets, output_tokens)
 
+@triton.jit(debug=True)
+def scan4(
+    gates,
+    tokens,
+    outputs,
+    ports,
+    SEQUENCE_LENGTH: tl.constexpr,
+    CHUNK_LENGTH: tl.constexpr,
+):
+    global_id = tl.num_programs(axis=1) * tl.program_id(axis=0) + tl.program_id(axis=1)
+    seq_offset = global_id * SEQUENCE_LENGTH
+    chunk = tl.program_id(axis=2) * CHUNK_LENGTH
+
+    out = 0.
+    port = 1.
+    for unroll_i in tl.static_range(CHUNK_LENGTH):
+        i = chunk + unroll_i
+        gate = tl.load(gates + seq_offset + i)
+        port = port * gate
+        if i == 0:
+            out = tl.load(tokens + seq_offset + i)
+        else:
+            out = gate * out + tl.load(tokens + seq_offset + i)
+        tl.store(outputs + seq_offset + i, out)
+        tl.store(ports + seq_offset + i, port)
+
+    tl.debug_barrier()
+    if chunk == 0:
+        tl.debug_barrier()
+
+        # stitch all chunks
+        indices = tl.arange(0, CHUNK_LENGTH)
+        last_index = CHUNK_LENGTH - 1
+        last_out = tl.load(outputs + seq_offset + last_index)
+
+        for chunk_i in range(1, tl.num_programs(axis=2)):
+            offsets = seq_offset + chunk_i * CHUNK_LENGTH + indices
+            chunk_outputs = tl.load(outputs + offsets)
+            chunk_ports = tl.load(ports + offsets)
+            chunk_outputs = chunk_ports * last_out + chunk_outputs
+            tl.store(outputs + offsets, chunk_outputs)
+            last_out = tl.load(outputs + seq_offset + chunk_i * CHUNK_LENGTH + last_index)
+            ## WHY DO YOU WORK ONLY WITH THIS PRINT?
+            # tl.device_print(
+            #     "stitch ", tl.program_id(axis=0), tl.program_id(axis=1), tl.program_id(axis=2), chunk_i,
+            # )
+
 class Scan(torch.autograd.Function):
     @staticmethod
     def forward(ctx, gates, tokens):
@@ -287,6 +334,23 @@ def test_backward():
     print(gates.grad[0,0,:64])
     assert torch.allclose(gates_auto_grad, gates.grad)
 
+
+def test_grid():
+    device = 'cuda'
+    B, C, T = 4, 4, 4
+    CHUNK_LENGTH = 2
+    gates, tokens = init(B, C, T, device)
+
+    outputs_eager = torch.empty_like(tokens)
+    scan_eager(gates, tokens, outputs_eager)
+
+    outputs = torch.empty_like(tokens)
+    ports = torch.empty_like(gates)
+    scan4[(B,C,T//CHUNK_LENGTH)](gates, tokens, outputs, ports, T, CHUNK_LENGTH=CHUNK_LENGTH, num_warps=1)
+    torch.cuda.synchronize()
+    print()
+    print(outputs - outputs_eager)
+    assert torch.allclose(outputs, outputs_eager)
 
 if __name__ == '__main__':
     bench.run(save_path=".", print_data=True)
