@@ -96,6 +96,7 @@ def scan3(
     gates,
     tokens,
     outputs,
+    output_gates,
     SEQUENCE_LENGTH: tl.constexpr,
 ):
     global_id = tl.num_programs(axis=1) * tl.program_id(axis=0) + tl.program_id(axis=1)
@@ -106,7 +107,9 @@ def scan3(
 
     tuples = pack64(tokens_, gates_)
     output_tuples = tl.associative_scan(tuples, axis=0, combine_fn=scan_op)
-    output_tokens, output_gates = unpack64(output_tuples)
+    output_tokens, output_gates1 = unpack64(output_tuples)
+    # when I exchange these two stores outputs blow up! why?
+    tl.store(output_gates + offsets, output_gates1)
     tl.store(outputs + offsets, output_tokens)
 
 @triton.jit()
@@ -309,7 +312,8 @@ def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=64, device="cuda"):
         case "scan2":
             scan = lambda: scan2[(B,C)](gates, tokens, outputs, SEQUENCE_LENGTH, CHUNK_LENGTH)
         case "tl.associative_scan":
-            scan = lambda: scan3[(B,C)](gates, tokens, outputs, SEQUENCE_LENGTH)
+            output_gates = torch.zeros_like(gates).contiguous()
+            scan = lambda: scan3[(B,C)](gates, tokens, outputs, output_gates, SEQUENCE_LENGTH)
         case "scan4":
             outputs = torch.zeros_like(tokens).contiguous()
             ports = torch.zeros_like(gates).contiguous() + 42
@@ -393,13 +397,17 @@ def test_allclose3():
     gates, tokens = init(B, C, T, device)
 
     outputs = torch.empty_like(tokens)
-    scan2[(B,C)](gates, tokens, outputs, T, UNROLL_LENGTH=16)
+    #scan2[(B,C)](gates, tokens, outputs, T, UNROLL_LENGTH=16)
+    scan_eager(gates, tokens, outputs)
 
-    outputs3 = torch.empty_like(tokens)
-    scan3[(B,C)](gates, tokens, outputs3, T)
-    print(outputs)
-    print(outputs3)
-    print((outputs - outputs3).abs().max())
+    outputs3 = torch.zeros_like(tokens).contiguous()
+    output_gates = torch.zeros_like(gates).contiguous()
+    scan3[(B,C)](gates, tokens, outputs3, output_gates, T)
+
+    print('max gate error', (output_gates - gates.cumprod(dim=-1)).abs().max())
+    #print(outputs)
+    #print(outputs3)
+    print('max error', (outputs - outputs3).abs().max())
     # LOOK AT THIS MASSIVE atol:
     assert torch.allclose(outputs, outputs3, atol=5e-1)
 
