@@ -108,7 +108,7 @@ def scan3(
     output_tokens, output_gates = unpack64(output_tuples)
     tl.store(outputs + offsets, output_tokens)
 
-@triton.jit(debug=True)
+@triton.jit()
 def scan4(
     gates,
     tokens,
@@ -287,7 +287,7 @@ def parallel_scan1(gates, x, mul, add, zeros_like, level):
     # ),
 ])
 def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=2, device="cuda"):
-    B, C, T = 1, 1, SEQUENCE_LENGTH
+    B, C, T = 1, 512, SEQUENCE_LENGTH
     gates, tokens = init(B, C, T, device)
     outputs = torch.empty_like(tokens)
 
@@ -425,7 +425,7 @@ def test_grid():
     # B, C, T = 1, 3, 1024
     # CHUNK_LENGTH = 128
 
-    B, C, T = 1, 1, 128
+    B, C, T = 1, 512, 128
     CHUNK_LENGTH = 64
     torch.manual_seed(12312323)
     gates, tokens = init(B, C, T, device)
