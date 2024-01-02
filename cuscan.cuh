@@ -200,7 +200,7 @@ void simple_scan_cuda(Params &params, cudaStream_t stream) {
 }
 
 std::vector<at::Tensor>
-simple_scan_forward(const at::Tensor &tokens, const at::Tensor &gates) {
+simple_scan_forward(const at::Tensor &gates, const at::Tensor &tokens) {
     auto input_type = tokens.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float);
 

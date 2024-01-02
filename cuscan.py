@@ -6,7 +6,7 @@ from pathlib import Path
 cuda_source = (Path(__file__).parent / 'cuscan.cuh').read_text()
 
 cpp_source = """
-std::vector<at::Tensor> simple_scan_forward(const at::Tensor &tokens, const at::Tensor &gates);
+std::vector<at::Tensor> simple_scan_forward(const at::Tensor &gates, const at::Tensor &tokens);
 """
 
 module = load_inline(
@@ -16,5 +16,7 @@ module = load_inline(
     functions=['simple_scan_forward'],
     verbose=True
 )
+simple_scan_forward = module.simple_scan_forward
 
-print(module.simple_scan_forward(torch.ones(1,1,128).cuda(), torch.ones(1,1,128).cuda()))
+if __name__ == '__main__':
+    print(module.simple_scan_forward(torch.ones(1,1,128).cuda(), torch.ones(1,1,128).cuda()))

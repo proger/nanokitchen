@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-
 @triton.jit
 def scan1(
     gates,
@@ -261,7 +260,7 @@ def parallel_scan1(gates, x, mul, add, zeros_like, level):
 @triton.testing.perf_report([
     triton.testing.Benchmark(
         x_names=["SEQUENCE_LENGTH"],  # argument names to use as an x-axis for the plot
-        x_vals=[2**i for i in range(6,17)],
+        x_vals=[2**i for i in range(7,17)],
         xlabel='sequence length',
         ylabel='ms',
         x_log=True,
@@ -269,24 +268,24 @@ def parallel_scan1(gates, x, mul, add, zeros_like, level):
         line_arg="provider",  # argument name whose value corresponds to a different line in the plot
         #line_vals=["scan1", "scan2", "tl.associative_scan", "eager"],  # argument values to use as different lines in the plot
         #line_names=["scan1", "scan2", "tl.associative_scan", "eager"],  # legend entries to use for each line
-        line_vals=["scan1", "scan2", "tl.associative_scan", "scan4", "parallel_scan", "heinsen_positive"],
-        line_names=["scan1", "scan2", "tl.associative_scan (fast but wrong)", "scan4", "parallel_scan (with torch.compile)", "Heinsen"],
+        line_vals=["scan1", "scan2", "tl.associative_scan", "scan4", "parallel_scan", "heinsen_positive", "cub"],
+        line_names=["scan1", "scan2", "tl.associative_scan (fast but wrong)", "scan4", "parallel_scan (with torch.compile)", "Heinsen", "cub"],
         plot_name="scan1",  # name of the plot
         args={
             #"SEQUENCE_LENGTH": seq_len,
         }
     ),
-    triton.testing.Benchmark(
-        x_names=["SEQUENCE_LENGTH"],
-        x_vals=[2**i for i in range(6,17)],
-        line_arg="CHUNK_LENGTH",
-        line_vals=[1,2,4,8,16,32,64,128,256],
-        line_names=[str(s) for s in [1,2,4,8,16,32,64,128,256]],
-        plot_name="scan2",
-        args={
-            "provider": "scan2",
-        }
-    ),
+    # triton.testing.Benchmark(
+    #     x_names=["SEQUENCE_LENGTH"],
+    #     x_vals=[2**i for i in range(7,17)],
+    #     line_arg="CHUNK_LENGTH",
+    #     line_vals=[1,2,4,8,16,32,64,128,256],
+    #     line_names=[str(s) for s in [1,2,4,8,16,32,64,128,256]],
+    #     plot_name="scan2",
+    #     args={
+    #         "provider": "scan2",
+    #     }
+    # ),
     # triton.testing.Benchmark(
     #     x_names=["SEQUENCE_LENGTH"],
     #     x_vals=[2**i for i in range(9)], # short sequence lengths as loop compilation is very slow
@@ -304,17 +303,19 @@ def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=64, device="cuda"):
     gates, tokens = init(B, C, T, device)
     outputs = torch.empty_like(tokens)
 
-    print(f"Running {provider} with sequence length {SEQUENCE_LENGTH} and chunk length {CHUNK_LENGTH}")
-
     match provider:
         case "scan1":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH}")
             scan = lambda: scan1[(B,C)](gates, tokens, outputs, SEQUENCE_LENGTH)
         case "scan2":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH} and chunk length {CHUNK_LENGTH}")
             scan = lambda: scan2[(B,C)](gates, tokens, outputs, SEQUENCE_LENGTH, CHUNK_LENGTH)
         case "tl.associative_scan":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH}")
             output_gates = torch.zeros_like(gates).contiguous()
             scan = lambda: scan3[(B,C)](gates, tokens, outputs, output_gates, SEQUENCE_LENGTH)
         case "scan4":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH} and chunk length {CHUNK_LENGTH}")
             outputs = torch.zeros_like(tokens).contiguous()
             ports = torch.zeros_like(gates).contiguous() + 42
             locks = torch.zeros((B, C), dtype=torch.int32, device=device).contiguous()
@@ -332,12 +333,20 @@ def bench(provider, SEQUENCE_LENGTH, CHUNK_LENGTH=64, device="cuda"):
                                                             CHUNK_LENGTH=CHUNK_LENGTH,
                                                             num_warps=1)
         case "parallel_scan":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH}")
             scan = lambda: parallel_scan(gates, tokens)
         case "heinsen_positive":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH}")
             scan = lambda: heinsen_positive(gates.abs().log(), tokens.abs().log())
+        case "cub":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH}")
+            from cuscan import simple_scan_forward
+            scan = lambda: simple_scan_forward(gates, tokens)
         case "eager":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH}")
             scan = lambda: scan_eager(gates, tokens, outputs)
         case "compile":
+            print(f"Running {provider} with sequence length {SEQUENCE_LENGTH}")
             # compilation times are proportional to sequence length!
             compiled = torch.compile(scan_eager)
             scan = lambda: compiled(gates, tokens, outputs)
