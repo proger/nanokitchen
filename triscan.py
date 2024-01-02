@@ -491,5 +491,18 @@ def test_heinsen():
     outputs = heinsen_positive(gates.log(), tokens.log())
     assert torch.allclose(outputs, outputs_eager)
 
+def test_allclose_cub():
+    device = 'cuda'
+    B, C, T = 1, 1024, 128
+    torch.manual_seed(12312323)
+    gates, tokens = init(B, C, T, device)
+
+    outputs_eager = torch.empty_like(tokens)
+    scan_eager(gates, tokens, outputs_eager)
+
+    from cuscan import simple_scan_forward
+    outputs, _ = simple_scan_forward(gates, tokens)
+    assert torch.allclose(outputs, outputs_eager)
+
 if __name__ == '__main__':
     bench.run(save_path=".", print_data=True)
