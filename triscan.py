@@ -405,20 +405,52 @@ def test_allclose3():
     B, C, T = 1, 512, 64
     gates, tokens = init(B, C, T, device)
 
+    print(gates, 'gates')
+    print(tokens, 'tokens')
+
     outputs = torch.empty_like(tokens)
-    #scan2[(B,C)](gates, tokens, outputs, T, UNROLL_LENGTH=16)
     scan_eager(gates, tokens, outputs)
+
+    print(outputs, 'outputs')
+
+    SHOW_BITS = False # for when you want to stare at the bit-level differences
+    if SHOW_BITS:
+        import struct
+        def bits(number):
+            s = struct.pack('!f', number)
+            b = ''.join(format(c, '08b') for c in s)
+            return b
+        def bxor(a, b):
+            return ''.join('1' if x != y else '0' for x, y in zip(a, b))
+        n0 = []
+        for number in outputs.squeeze().tolist():
+            n0.append(number)
+            print(bits(number))
 
     outputs3 = torch.zeros_like(tokens).contiguous()
     output_gates = torch.zeros_like(gates).contiguous()
-    scan3[(B,C)](gates, tokens, outputs3, output_gates, T)
+    scan3[(B,C)](gates, tokens, outputs3, output_gates, T, enable_fp_fusion=False)
+
+    print(outputs3, 'outputs3')
+
+    if SHOW_BITS:
+        n1 = []
+        for number in outputs3.squeeze().tolist():
+            n1.append(number)
+            print(bits(number))
+
+        print('xor')
+        for a,b in zip(n0, n1):
+            print(bxor(bits(a), bits(b)))
+
 
     print('max gate error', (output_gates - gates.cumprod(dim=-1)).abs().max())
     #print(outputs)
     #print(outputs3)
     print('max error', (outputs - outputs3).abs().max())
-    # LOOK AT THIS MASSIVE atol:
-    assert torch.allclose(outputs, outputs3, atol=5e-1)
+    # LOOK AT THIS MASSIVE atol you'd have without enable_fp_fusion:
+    #assert torch.allclose(outputs, outputs3, atol=5e-1)
+    assert torch.allclose(outputs, outputs3)
 
 def test_backward():
     device = 'cuda'
@@ -502,6 +534,7 @@ def test_allclose_cub():
 
     from cuscan import simple_scan_forward
     outputs, _ = simple_scan_forward(gates, tokens)
+    print('max error', (outputs_eager - outputs).abs().max())
     assert torch.allclose(outputs, outputs_eager)
 
 if __name__ == '__main__':
