@@ -537,5 +537,26 @@ def test_allclose_cub():
     print('max error', (outputs_eager - outputs).abs().max())
     assert torch.allclose(outputs, outputs_eager)
 
+def test_allclose_warp():
+    device = 'cuda'
+    B, C, T = 1, 1, 32
+    torch.manual_seed(12312323)
+    gates, tokens = init(B, C, T, device)
+
+    outputs_eager = torch.empty_like(tokens)
+    scan_eager(gates, tokens, outputs_eager)
+
+    from warpscan import make_warp_scan
+    STEPS_PER_THREAD = 1
+    scan, block_dim, N = make_warp_scan(STEPS_PER_THREAD=STEPS_PER_THREAD, WARPS_PER_BLOCK=T//32//STEPS_PER_THREAD)
+    #import ipdb; ipdb.set_trace()
+
+    assert N == T
+    outputs = torch.zeros_like(tokens)
+    scan[(1,), block_dim](gates.squeeze(), tokens.squeeze(), outputs.squeeze())
+
+    print('max error', (outputs_eager - outputs).abs().max())
+    assert torch.allclose(outputs, outputs_eager)
+
 if __name__ == '__main__':
     bench.run(save_path=".", print_data=True)

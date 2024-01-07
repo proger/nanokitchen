@@ -16,12 +16,12 @@ def make_warp_scan(
     assert block_dim <= MAX_THREADS_PER_BLOCK
     N = block_dim * STEPS_PER_THREAD
 
-    @cuda.jit
-    def scan(data, result):
-        def mzero():
-            return 0
-        def mappend(a, b):
-            return a + b
+    @cuda.jit(fastmath=False)
+    def scan(gates, tokens, result):
+        def mempty() -> (np.float32, np.float32):
+            return 1., 0.
+        def mappend(fl, xl, fr, xr):
+            return fl * fr, xl * fr + xr
 
         thread_id = cuda.threadIdx.x
         warp_id = thread_id // WARP_SIZE
@@ -31,12 +31,18 @@ def make_warp_scan(
         # Perform a little bit of sequential computation in thread registers.
         #
 
-        thread_acc = cuda.local.array(STEPS_PER_THREAD, np.float32)
+        thread_acc_f = cuda.local.array(STEPS_PER_THREAD, np.float32)
+        thread_acc_x = cuda.local.array(STEPS_PER_THREAD, np.float32)
 
-        acc = mzero()
+        acc_f, acc_x = mempty()
         for i in range(0, STEPS_PER_THREAD):
-            acc = mappend(acc, data[thread_id * STEPS_PER_THREAD + i])
-            thread_acc[i] = acc
+            g = np.float32(gates[thread_id * STEPS_PER_THREAD + i])
+            t = np.float32(tokens[thread_id * STEPS_PER_THREAD + i])
+            acc_f, acc_x = mappend(acc_f,
+                                   acc_x,
+                                   g,
+                                   t)
+            thread_acc_f[i], thread_acc_x[i] = acc_f, acc_x
 
         cuda.syncthreads()
 
@@ -50,12 +56,13 @@ def make_warp_scan(
             # At the same time:
             # Send acc to the thread with id (lane_id + delta)
             # Receive acc of the thread with id (lane_id - delta)
-            recv = cuda.shfl_up_sync(0xffffffff, acc, delta)
+            recv_f = cuda.shfl_up_sync(0xffffffff, acc_f, delta)
+            recv_x = cuda.shfl_up_sync(0xffffffff, acc_x, delta)
 
             if lane_id >= delta:
                 for i in range(0, STEPS_PER_THREAD):
-                    acc = mappend(thread_acc[i], recv)
-                    thread_acc[i] = acc
+                    acc_f, acc_x = mappend(thread_acc_f[i], thread_acc_x[i], recv_f, recv_x)
+                    thread_acc_f[i], thread_acc_x[i] = acc_f, acc_x
 
         cuda.syncthreads()
 
@@ -63,98 +70,64 @@ def make_warp_scan(
         # Stitch warps in a block using shared memory.
         #
 
-        warp_last = cuda.shared.array(shape=WARPS_PER_BLOCK, dtype=np.float32)
+        warp_last_f = cuda.shared.array(shape=WARPS_PER_BLOCK, dtype=np.float32)
+        warp_last_x = cuda.shared.array(shape=WARPS_PER_BLOCK, dtype=np.float32)
         if lane_id == WARP_SIZE - 1:
-            warp_last[warp_id] = acc
+            warp_last_f[warp_id] = acc_f
+            warp_last_x[warp_id] = acc_x
 
         cuda.syncthreads()
 
         if WARPS_PER_BLOCK <= 4:
             # if there are at most 4 warps per block, do a sequential scan over shared memory
             if thread_id == 0:
-                warp_acc = mzero()
+                warp_acc_f, warp_acc_x = mempty()
                 for w in range(0, WARPS_PER_BLOCK):
-                    warp_acc = mappend(warp_acc, warp_last[w])
-                    warp_last[w] = warp_acc
+                    warp_acc_f, warp_acc_x = mappend(warp_acc_f,
+                                                     warp_acc_x,
+                                                     warp_last_f[w],
+                                                     warp_last_x[w])
+                    warp_last_f[w] = warp_acc_f
+                    warp_last_x[w] = warp_acc_x
         else:
             # otherwise do a warp scan on warp 0
             if warp_id == 0:
                 if lane_id < WARPS_PER_BLOCK:
-                    warp_acc = warp_last[lane_id]
+                    warp_acc_f = warp_last_f[lane_id]
+                    warp_acc_x = warp_last_x[lane_id]
                 else:
-                    warp_acc = mzero()
+                    warp_acc_f, warp_acc_x = mempty()
 
                 for e in range(0, LOG_WARP_SIZE):
                     delta = 1 << e
-                    recv = cuda.shfl_up_sync(0xffffffff, warp_acc, delta)
+                    recv_f = cuda.shfl_up_sync(0xffffffff, warp_acc_f, delta)
+                    recv_x = cuda.shfl_up_sync(0xffffffff, warp_acc_x, delta)
 
                     if lane_id >= delta:
-                        warp_acc = mappend(warp_acc, recv)
+                        warp_acc_f, warp_acc_x = mappend(warp_acc_f, warp_acc_x, recv_f, recv_x)
 
                 if lane_id < WARPS_PER_BLOCK:
-                    warp_last[lane_id] = warp_acc
+                    warp_last_f[lane_id] = warp_acc_f
+                    warp_last_x[lane_id] = warp_acc_x
                     #print('warp', warp_id, 'lane', lane_id, 'warp_acc', warp_acc)
 
         cuda.syncthreads()
 
         # Add the last element of the previous warp to each element of the current warp.
         if warp_id > 0:
-            warp_from_left = warp_last[warp_id - 1]
+            warp_from_left_f = warp_last_f[warp_id - 1]
+            warp_from_left_x = warp_last_x[warp_id - 1]
         else:
-            warp_from_left = 0
+            warp_from_left_f, warp_from_left_x = mempty()
 
         for i in range(0, STEPS_PER_THREAD):
-            thread_acc[i] = mappend(thread_acc[i], warp_from_left)
-            result[thread_id * STEPS_PER_THREAD + i] = thread_acc[i]
+            thread_acc_f[i], thread_acc_x[i] = mappend(thread_acc_f[i],
+                                                       thread_acc_x[i],
+                                                       warp_from_left_f,
+                                                       warp_from_left_x)
+            result[thread_id * STEPS_PER_THREAD + i] = thread_acc_x[i]
 
         #print('thread', thread_id, 'warp', warp_id, 'lane', lane_id, 'acc', i, thread_acc[i])
 
     return scan, block_dim, N
 
-# approximation for your mental model
-def scan_sim(data, WARP_SIZE=32):
-    STEPS_PER_THREAD = 1 # not simulating these
-    WARPS_PER_BLOCK = data.shape[0] // WARP_SIZE
-
-    #
-    # Stitch threads in a warp using shuffling.
-    #
-
-    result = np.zeros_like(data)
-    for w in range(WARPS_PER_BLOCK):
-        interval = slice(w * WARP_SIZE, (w + 1) * WARP_SIZE)
-        result[interval] = np.cumsum(data[interval])
-
-    #
-    # Stitch warps in a block using shared memory.
-    #
-
-    warp_last = np.zeros(WARPS_PER_BLOCK)
-    for w in range(1, WARPS_PER_BLOCK):
-        warp_last[w] = warp_last[w-1] +  result[(w-1) * WARP_SIZE + WARP_SIZE - 1]
-    rep = np.repeat(warp_last, WARP_SIZE)
-
-    result = result + rep
-    
-    return result
-
-
-if __name__ == '__main__':
-
-    scan, block_dim, N = make_warp_scan(
-        STEPS_PER_THREAD=1,
-        WARPS_PER_BLOCK=4
-    )
-    data = np.arange(N).astype(np.float32)
-    result = np.zeros_like(data)
-    scan[(1,), block_dim](data, result)
-
-    print(data, "data")
-    print(result, "result")
-    ref = np.cumsum(data)
-    print(ref, "cumsum")
-    assert np.allclose(result, ref)
-    sim = scan_sim(data)
-    #print(sim, "ref")
-    assert np.allclose(sim, ref)
-    print(N)
