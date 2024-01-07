@@ -107,7 +107,7 @@ def scan(data, result):
     #print('thread', thread_id, 'warp', warp_id, 'lane', lane_id, 'acc', i, thread_acc[i])
 
 
-# simulator
+# approximation for your mental model
 def scan_sim(data, WARP_SIZE=32):
     STEPS_PER_THREAD = 1 # not simulating these
     WARPS_PER_BLOCK = data.shape[0] // WARP_SIZE
