@@ -16,10 +16,10 @@ def make_warp_scan(
     assert block_dim <= MAX_THREADS_PER_BLOCK
     N = block_dim * STEPS_PER_THREAD
 
-    @cuda.jit(fastmath=False)
+    @cuda.jit(fastmath=False, lineinfo=True)
     def scan(gates, tokens, result):
-        def mempty() -> (np.float32, np.float32):
-            return 1., 0.
+        def mempty():
+            return np.float32(1.), np.float32(0.)
         def mappend(fl, xl, fr, xr):
             return fl * fr, xl * fr + xr
 
@@ -130,4 +130,3 @@ def make_warp_scan(
         #print('thread', thread_id, 'warp', warp_id, 'lane', lane_id, 'acc', i, thread_acc[i])
 
     return scan, block_dim, N
-
